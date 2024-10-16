@@ -1,65 +1,201 @@
-import { DurableObject } from "cloudflare:workers";
+import { DurableObject } from 'cloudflare:workers';
+import { Hono } from 'hono';
+import { logger } from 'hono/logger';
 
-/**
- * Welcome to Cloudflare Workers! This is your first Durable Objects application.
- *
- * - Run `npm run dev` in your terminal to start a development server
- * - Open a browser tab at http://localhost:8787/ to see your Durable Object in action
- * - Run `npm run deploy` to publish your application
- *
- * Bind resources to your worker in `wrangler.toml`. After adding bindings, a type definition for the
- * `Env` object can be regenerated with `npm run cf-typegen`.
- *
- * Learn more at https://developers.cloudflare.com/durable-objects
- */
+type FeedbackType = 'okay' | 'good' | 'great' | 'mindBlown';
 
-/** A Durable Object's behavior is defined in an exported Javascript class */
-export class MyDurableObject extends DurableObject {
-	/**
-	 * The constructor is invoked once upon creation of the Durable Object, i.e. the first call to
-	 * 	`DurableObjectStub::get` for a given identifier (no-op constructors can be omitted)
-	 *
-	 * @param ctx - The interface for interacting with Durable Object state
-	 * @param env - The interface to reference bindings declared in wrangler.toml
-	 */
-	constructor(ctx: DurableObjectState, env: Env) {
-		super(ctx, env);
+enum SendType {
+	REACTIONS = 'reactions',
+}
+
+interface ReactionState {
+	mtype: SendType.REACTIONS;
+	emoji: string;
+	type: 'broadcast';
+	page: number | string;
+	slideTitle: string;
+	feedback: FeedbackType;
+}
+
+export class Presentation extends DurableObject {
+	sql: SqlStorage;
+
+	constructor(state: DurableObjectState, env: Env) {
+		super(state, env);
+		this.sql = this.ctx.storage.sql;
+
+		// create table to store presentation title and the presentation id
+		this.sql.exec(`CREATE TABLE IF NOT EXISTS presentation (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, presentation_id TEXT)`);
 	}
-
-	/**
-	 * The Durable Object exposes an RPC method sayHello which will be invoked when when a Durable
-	 *  Object instance receives a request from a Worker via the same method invocation on the stub
-	 *
-	 * @param name - The name provided to a Durable Object instance from a Worker
-	 * @returns The greeting to be sent back to the Worker
-	 */
-	async sayHello(name: string): Promise<string> {
-		return `Hello, ${name}!`;
+	getAllEntries() {
+		const result = this.sql.exec('SELECT * FROM presentation');
+		return result.toArray();
+	}
+	addEntry(title: string, presentation_id: string) {
+		const exists = this.sql.exec('SELECT * FROM presentation WHERE presentation_id = ?', presentation_id);
+		if (exists.toArray()[0]) return 'Presentation already exists';
+		return this.sql.exec('INSERT INTO presentation (title, presentation_id) VALUES (?, ?)', title, presentation_id).toArray();
 	}
 }
 
-export default {
-	/**
-	 * This is the standard fetch handler for a Cloudflare Worker
-	 *
-	 * @param request - The request submitted to the Worker from the client
-	 * @param env - The interface to reference bindings declared in wrangler.toml
-	 * @param ctx - The execution context of the Worker
-	 * @returns The response to be sent back to the client
-	 */
-	async fetch(request, env, ctx): Promise<Response> {
-		// We will create a `DurableObjectId` using the pathname from the Worker request
-		// This id refers to a unique instance of our 'MyDurableObject' class above
-		let id: DurableObjectId = env.MY_DURABLE_OBJECT.idFromName(new URL(request.url).pathname);
+export class Slide extends DurableObject {
+	session: Map<WebSocket, any>;
+	sql: SqlStorage;
+	env: Env;
 
-		// This stub creates a communication channel with the Durable Object instance
-		// The Durable Object constructor will be invoked upon the first call for a given id
-		let stub = env.MY_DURABLE_OBJECT.get(id);
+	constructor(ctx: DurableObjectState, env: Env) {
+		super(ctx, env);
+		this.session = new Map();
+		this.sql = this.ctx.storage.sql;
+		this.ctx.getWebSockets().forEach((ws) => this.session.set(ws, { ...ws.deserializeAttachment() }));
+		this.env = env;
 
-		// We call the `sayHello()` RPC method on the stub to invoke the method on the remote
-		// Durable Object instance
-		let greeting = await stub.sayHello("world");
+		this.sql.exec(
+			`CREATE TABLE IF NOT EXISTS slide (id INTEGER PRIMARY KEY AUTOINCREMENT, slide_id INTEGER, slide_title TEXT, feedback_okay INTEGER DEFAULT 0, feedback_good INTEGER DEFAULT 0, feedback_great INTEGER DEFAULT 0, feedback_mindBlown INTEGER DEFAULT 0)`
+		);
+	}
 
-		return new Response(greeting);
-	},
-} satisfies ExportedHandler<Env>;
+	getFeedback() {
+		const result = this.sql.exec('SELECT * FROM slide');
+		return result.toArray();
+	}
+
+	private addSlide(id: number, title: string) {
+		const exists = this.sql.exec('SELECT * FROM slide WHERE slide_id = ?', id);
+		if (exists.toArray()[0]) return 'Slide already exists';
+		return this.sql.exec('INSERT INTO slide (slide_id, slide_title) VALUES (?, ?)', id, title).toArray();
+	}
+
+	private drop() {
+		const result = this.sql.exec('DROP TABLE slide');
+		return result.toArray();
+	}
+
+	private addFeedback(id: number, title: string, feedback: FeedbackType) {
+		const exists = this.sql.exec('SELECT * FROM slide WHERE slide_id = ?', id);
+
+		if (!exists.toArray()[0]) {
+			console.log('Slide does not exist');
+			this.addSlide(id, title);
+		}
+		const feedbackColumn = `feedback_${feedback}`;
+		const query = `UPDATE slide SET ${feedbackColumn} = ${feedbackColumn} + 1 WHERE slide_id = ?`;
+
+		return this.sql.exec(query, id).toArray();
+	}
+
+	async fetch(request: Request): Promise<Response> {
+		// Creates two ends of a WebSocket connection.
+		const webSocketPair = new WebSocketPair();
+		const [client, server] = Object.values(webSocketPair);
+		this.ctx.acceptWebSocket(server);
+		// Add the new WebSocket to the list of active WebSockets.
+		this.session.set(server, {});
+
+		let url = new URL(request.url);
+		const title = decodeURIComponent(url.pathname.split('/').pop() as string);
+		const id = title.toLowerCase().replaceAll(/\s/g, '-');
+
+		const presentationStub = this.env.PRESENTATION.get(this.env.PRESENTATION.idFromName('presentation'));
+		await presentationStub.addEntry(id, title);
+
+		return new Response(null, {
+			status: 101,
+			webSocket: client,
+		});
+	}
+
+	webSocketMessage(ws: WebSocket, message: ArrayBuffer | string) {
+		const session = this.session.get(ws);
+		if (!session.id) {
+			session.id = crypto.randomUUID();
+			ws.serializeAttachment({ ...ws.deserializeAttachment(), id: session.id });
+			ws.send(JSON.stringify({ type: 'connected', id: session.id }));
+		}
+		const receivedMessage: ReactionState = JSON.parse(typeof message === 'string' ? message : '');
+
+		const { page, slideTitle, feedback, type, mtype } = receivedMessage;
+
+		console.log('message received of mtype', mtype);
+
+		if (type === 'broadcast' && mtype === 'reactions') {
+			this.addFeedback(Number(page), slideTitle, feedback);
+			this.broadcast(ws, receivedMessage);
+		}
+	}
+	private broadcast(sender: WebSocket, message: {}) {
+		const id = this.session.get(sender).id;
+
+		for (let [ws] of this.session) {
+			if (sender === ws) continue;
+			ws.send(JSON.stringify({ ...message, id }));
+		}
+	}
+
+	private close(ws: WebSocket) {
+		const session = this.session.get(ws);
+		if (!session?.id) return;
+		this.session.delete(ws);
+	}
+	webSocketClose(ws: WebSocket) {
+		this.close(ws);
+	}
+	webSocketError(ws: WebSocket) {
+		this.close(ws);
+	}
+}
+
+const app = new Hono<{ Bindings: Env }>();
+
+app.use(logger());
+
+app.get('/ws/:title', async (c) => {
+	// Get URL
+	const url = new URL(c.req.url);
+	const title = c.req.param('title');
+
+	const id = title.toLowerCase().replaceAll(/\s/g, '-');
+
+	const slideId = c.env.SLIDE.idFromName(id);
+	const slideStub = c.env.SLIDE.get(slideId);
+
+	return slideStub.fetch(c.req.raw);
+});
+
+app.get('/api/presentations', async (c) => {
+	const id = c.env.PRESENTATION.idFromName('presentation');
+	const stub = c.env.PRESENTATION.get(id);
+	const result = await stub.getAllEntries();
+
+	const formattedResult = result.map((entry) => {
+		return {
+			'No.': entry.id,
+			Title: entry.title,
+			Slug: entry.presentation_id,
+		};
+	});
+
+	return new Response(JSON.stringify(formattedResult));
+});
+
+app.get('/api/feedback/:slideId', async (c) => {
+	const slideId = c.req.param('slideId');
+	const id = c.env.SLIDE.idFromName(slideId);
+	const stub = c.env.SLIDE.get(id);
+	const result = await stub.getFeedback();
+
+	const formattedResult = result.map((entry) => {
+		return {
+			'Slide No.': entry.slide_id,
+			Title: entry.slide_title,
+			Okay: entry.feedback_okay,
+			Good: entry.feedback_good,
+			Great: entry.feedback_great,
+			'Mind Blown': entry.feedback_mindBlown,
+		};
+	});
+
+	return new Response(JSON.stringify(formattedResult));
+});
+
+export default app;

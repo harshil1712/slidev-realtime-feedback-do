@@ -1,6 +1,6 @@
 {
-  "name": "slidev-do",
-  "version": "0.0.0",
+  "name": "slidev-realtime-feedback-do",
+  "version": "0.0.1",
   "private": true,
   "scripts": {
     "deploy": "wrangler deploy",
@@ -12,5 +12,8 @@
     "@cloudflare/workers-types": "^4.20241011.0",
     "typescript": "^5.5.2",
     "wrangler": "^3.60.3"
+  },
+  "dependencies": {
+    "hono": "^4.6.5"
   }
 }
