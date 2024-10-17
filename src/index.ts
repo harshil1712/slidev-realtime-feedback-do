@@ -74,14 +74,18 @@ export class Slide extends DurableObject {
 	private addFeedback(id: number, title: string, feedback: FeedbackType) {
 		const exists = this.sql.exec('SELECT * FROM slide WHERE slide_id = ?', id);
 
-		if (!exists.toArray()[0]) {
-			console.log('Slide does not exist');
-			this.addSlide(id, title);
-		}
-		const feedbackColumn = `feedback_${feedback}`;
-		const query = `UPDATE slide SET ${feedbackColumn} = ${feedbackColumn} + 1 WHERE slide_id = ?`;
+		try {
+			if (!exists.toArray()[0]) {
+				console.log('Slide does not exist');
+				this.addSlide(id, title);
+			}
+			const feedbackColumn = `feedback_${feedback}`;
+			const query = `UPDATE slide SET ${feedbackColumn} = ${feedbackColumn} + 1 WHERE slide_id = ?`;
 
-		return this.sql.exec(query, id).toArray();
+			return this.sql.exec(query, id).toArray();
+		} catch (error) {
+			console.log(error);
+		}
 	}
 
 	async fetch(request: Request): Promise<Response> {
@@ -97,7 +101,7 @@ export class Slide extends DurableObject {
 		const id = title.toLowerCase().replaceAll(/\s/g, '-');
 
 		const presentationStub = this.env.PRESENTATION.get(this.env.PRESENTATION.idFromName('presentation'));
-		await presentationStub.addEntry(id, title);
+		await presentationStub.addEntry(title, id);
 
 		return new Response(null, {
 			status: 101,
@@ -179,8 +183,8 @@ app.get('/api/presentations', async (c) => {
 });
 
 app.get('/api/feedback/:slideId', async (c) => {
-	const slideId = c.req.param('slideId');
-	const id = c.env.SLIDE.idFromName(slideId);
+	const slideId = c.req.param('slideId') as string;
+	const id = c.env.SLIDE.idFromName(slideId.toLowerCase().replaceAll(/\s/g, '-'));
 	const stub = c.env.SLIDE.get(id);
 	const result = await stub.getFeedback();
 
