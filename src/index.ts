@@ -56,7 +56,8 @@ export class Slide extends DurableObject {
 	}
 
 	getFeedback() {
-		const result = this.sql.exec('SELECT * FROM slide');
+		// order by slide_id
+		const result = this.sql.exec('SELECT * FROM slide ORDER BY slide_id');
 		return result.toArray();
 	}
 
