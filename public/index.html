@@ -89,7 +89,12 @@
 				tableHTML += '</tr>';
 
 				data.forEach((row, index) => {
-					tableHTML += `<tr class="clickable-row" onclick="selectPresentation(${index})">`;
+					// tableHTML += `<tr class=${type === 'presentations' && 'clickable-row'} onclick="selectPresentation(${index})">`;
+					if (type === 'presentations') {
+						tableHTML += `<tr class='clickable-row' onclick="selectPresentation(${index})">`;
+					} else {
+						tableHTML += `<tr>`;
+					}
 					headers.forEach((header) => {
 						tableHTML += `<td>${row[header]}</td>`;
 					});
