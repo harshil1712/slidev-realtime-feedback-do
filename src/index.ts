@@ -6,6 +6,14 @@ type FeedbackType = 'okay' | 'good' | 'great' | 'mindBlown';
 
 enum SendType {
 	REACTIONS = 'reactions',
+	SLIDEUPDATE = 'slideupdate',
+}
+
+interface SlideUpdateState {
+	mtype: SendType.SLIDEUPDATE;
+	page: number | string;
+	click: number;
+	type: 'broadcast';
 }
 
 interface ReactionState {
@@ -117,14 +125,18 @@ export class Slide extends DurableObject {
 			ws.serializeAttachment({ ...ws.deserializeAttachment(), id: session.id });
 			ws.send(JSON.stringify({ type: 'connected', id: session.id }));
 		}
-		const receivedMessage: ReactionState = JSON.parse(typeof message === 'string' ? message : '');
+		const receivedMessage: ReactionState | SlideUpdateState = JSON.parse(typeof message === 'string' ? message : '');
 
-		const { page, slideTitle, feedback, type, mtype } = receivedMessage;
+		const { page, type, mtype } = receivedMessage;
 
 		console.log('message received of mtype', mtype);
 
 		if (type === 'broadcast' && mtype === 'reactions') {
+			const { slideTitle, feedback } = receivedMessage;
 			this.addFeedback(Number(page), slideTitle, feedback);
+			this.broadcast(ws, receivedMessage);
+		}
+		if (type === 'broadcast' && mtype === 'slideupdate') {
 			this.broadcast(ws, receivedMessage);
 		}
 	}
