@@ -25,6 +25,10 @@ This project enhances presentations by allowing real-time audience feedback usin
 2. `Slide` class: Stores the feedback for individual slides. Also handles WebSocket connections and broadcasts
 3. A UI to view the stats
 
+## Deploy
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/harshil1712/slidev-realtime-feedback-do)
+
 ## Getting Started
 
 1. Clone the repository
